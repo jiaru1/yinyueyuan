@@ -187,3 +187,104 @@ SMOKE DONE
 - lerd `init.conf` 启动探测失败时不阻塞加载、不抛未捕获异常。
 - 未做真实音乐接口请求，未验证任何后端实际出链；上线前需在洛雪客户端里
   实测各平台/音质的出链情况（各后端可用性以实测为准）。
+
+---
+
+## 6. v1.0.1 构建记录（2026-11-09）
+
+- 上游：`~/workspace/lx-music-source-upstream`（pdone/lx-music-source，
+  commit `ed8328dbd1a77aee3ee0116d835eb9d907eeaad2`）。
+- 产物：`merged.js`（可读合并源码，1649 行，79,629 字节）、`latest.js`（混淆版，132,323 字节）。
+- 平台（6 个，不变）：kw/kg/tx/wy/mg/qs；音质不变。
+- 后端条目：25 → **49 个**（新增 24 个，见下表；去重规则不变）。
+- 版本：1.0.0 → **1.0.1**（无新增平台，patch 递增）。
+
+### 6.1 新增后端与协议来源
+
+| 合并版后端 | 协议来源 | 关键写法 |
+|---|---|---|
+| ChKsZ（api.chksz.top，仅 wy） | feichangdao/latest.js L11、L22、L196-206 | GET `/api/163_music?id=&level=`，Referer `https://cp.chksz.top/`；level 128k→standard、320k→exhigh、flac→lossless、flac24bit→jymaster；code 200 + data.url |
+| 汽水H5（api.qishui.com，仅 qs/128k） | feichangdao/latest.js L19、L287-296 | GET `/luna/h5/track?track_id=` → `track_player.video_model`（JSON 字符串）→ `video_list[0].main_url`；无音质参数，只挂 qs/128k |
+| 迅回QQ（api.xunhuisi.store，仅 tx/128k） | qingliang/latest.js L230-236 | GET `/API/QQMusic/Song.php?mid=&type=json` → code 200 + music_url |
+| lzm（music.lzmhhh.com，tx/wy） | qingliang/latest.js L264-266、L283-285 | POST 表单 `/api/music/url { id, type: 'qq' \| 'wy' }`，Referer `https://music.lzmhhh.com/` → data / data.url；tx 128k/320k，wy 仅 320k |
+| yutang（api.yutangxiaowu.cn，仅 wy） | qingliang/latest.js L267-269 | GET `/api/music/Song_V1?url=&level=&type=json` → url/data.url；level 128k→standard、320k→exhigh、flac→lossless |
+| kangqi（ncm.kangqiovo.com，仅 wy） | qingliang/latest.js L270-272 | POST 表单 `/Song_V1 { url, level, type: json }`，Referer `https://ncm.kangqiovo.com/` → data.url/url |
+| qjqq（metings.qjqq.cn，仅 wy） | qingliang/latest.js L273-275 | POST 表单 `/Song_V1 { url, level, type: json }` → data.url/url |
+| 酷狗手机版（m.kugou.com，仅 kg） | qingliang/latest.js L292-306 | GET `/app/i/getSongInfo.php?cmd=playInfo&hash=` → url/data.url；无音质参数，挂 kg 链末尾 |
+| 酷狗Web版（wwwapi.kugou.com，仅 kg） | qingliang/latest.js L307-322、xinglan 酷狗官方 | GET `/yy/index.php?r=play/getdata&hash=&platid=4&album_id=&mid=00000000000000000000000000000000` → status 1 + data.play_backup_url/data.play_url；无音质参数，挂 kg 链末尾 |
+| 网易免费外链（music.163.com，仅 wy/128k） | qingliang/latest.js L394 | 直接返回 URL 字符串 `https://music.163.com/song/media/outer/url?id={id}.mp3` |
+| 落月QQ（api.vkeys.cn，仅 tx） | xinglan/latest.js L364-372、L862-905 | v2 `GET /v2/music/tencent/geturl?mid=&quality=` 失败降级 v3 `GET /music/tencent/song/link?mid=&quality=`；quality 128k→6、320k→8、flac→10、flac24bit→10；取 data.url 或 data 字符串 |
+| 317ak（api.317ak.cn，仅 tx） | xinglan/latest.js（_u 解码后） | GET `/api/yinyue/qqyinyue?ckey=ZK76QJCIH5PPICJOOXUH&i=&br=&type=json&lrc=1` → url/data.url；br 128k→5、320k→6、flac→8、flac24bit→7；ckey 为上游公开值 |
+| ygking（api.ygking.cn，仅 tx） | xinglan/latest.js L737-748（_u 解码后） | GET `/api/song/url?mid=&quality=` → code 0 + data[mid]；quality 128k→128、320k→320、flac→flac、flac24bit→hires |
+| 残像（api.canxiang.cn，仅 wy） | xinglan/latest.js L750-769（_u 解码后） | GET `/api/wyymusic?token=canxiang_token_2026&type=&id=`（无 id 时 msg=歌名+歌手&n=1）→ code 200 + data.url；type 128k→128k、320k→320k、flac→flac、flac24bit→hires |
+| 笒鬼鬼（api.cenguigui.cn，仅 wy） | xinglan/latest.js（_u 解码后） | GET `/api/netease/music_v1.php?id=&type=json&level=` → data.url/url；level 128k→standard、320k→exhigh、flac→lossless、flac24bit→hires |
+| 星海 api.xinghai.com（kw/kg/mg） | xinglan/latest.js L770-789 getXinghai（_u 解码后） | GET `/lx/api/?source={kw\|kg\|migu}&name=&songmid=&quality=` → code 200 + url；quality 128k→128kmp3、320k→320kmp3、flac→flac、flac24bit→hires |
+| 酷我流媒体（175.27.166.236:8928，仅 kw） | xinglan/latest.js（_u 解码后） | 直接返回 URL 字符串 `http://175.27.166.236:8928/kwstream?id=&level=&stream=1`；level 128k→128k、320k→320k、flac→flac；flac24bit 跳过（该源映射为 flac，属降级） |
+| 酷我手机版（mobi.kuwo.cn，仅 kw） | xinglan/latest.js（_u 解码后） | GET `/mobi.s?f=web&rid=&br=` → code 200 + data.url/data.surl；br 同酷我官方 |
+| 念心酷狗（mcp.nianxinxz.com，仅 kg） | xinglan/latest.js L813-825（_u 解码后） | GET `/kgqq/kg.php?id=&level=&type=mp3` → code 200 + url，或直接返回 URL 字符串；level 128k→128kmp3、320k→320kmp3、flac→2000kflac、flac24bit→4000kflac |
+| Migu直接源（music.migu.cn，仅 mg） | xinglan/latest.js MG 池（_u 解码后） | GET `/v3/api/music/audioPlayer/getPlayInfo?copyrightId=&level=` → data.playUrl/url/playUrl；level 128k→standard、320k→exhigh、flac/flac24bit→lossless |
+| Migu API（app.c.nf.migu.cn，仅 mg） | xinglan/latest.js MG 池（_u 解码后） | GET `/MIGUM2.0/strategy/listen-url/v2.2?copyrightId=&quality=` → data.url/url/data.playUrl；quality 128k→PQ、320k→HQ、flac→SQ、flac24bit→ZQ |
+| FishAPI（music.gdstudio.xyz，tx/wy） | xinglan/latest.js L710-735 | 先 GET `/time` 取时间（前 9 位），sign = md5(`music.gdstudio.xyz\|20260510\|time\|secret`) 后 8 位大写，secret = encodeURIComponent(songmid)；POST 表单 `/api.php { types, id, source: qq/netease, br, s }` → body.url；br 128k→128、320k→320、flac→740、flac24bit→999；md5 取 `lx.utils.crypto.md5`，无此工具时后端跳过 |
+| FFAPI（ffapi.cn，tx/wy/kw/kg/mg） | xinglan/latest.js L827-860 | GET `/int/v2/songurl?url={平台歌曲页地址}` → url/data.url/data.play_url/data.vipmusic.url/data[0].url；平台页见 merged.js 注释 |
+| 海棠 resolve-url-qt（qt.haitangw.net） | xinglan/latest.js L597-603 | 与 musicserver 同路径同参数的第二 host，`POST /v1/music/resolve-url` |
+
+### 6.2 既有后端的改动
+
+1. **星海聚合鉴权（断裂修复）**：xinghai v3.2.18 改为服务器签发令牌，旧本地自签 base64 写法自 2026-11 起一律 403。合并版改用 `GET https://yy.zddyr.top/lx/api/token.php?device_id=` 取 `data.token`（4 分钟本地换新，`auth.tk_mismatch`/`untrusted-token`/`tk_error` 时刷新一次重试；拿不到令牌不发请求；启动时预取一次，失败不阻塞）。`deviceId` 生成方式与旧版相同。
+2. **星海聚合备（zrcdy.dpdns.org）**：xinghai v3.2.18 已删除该域名引用，备条目失去上游佐证；仍保留，令牌复用主域名签发的 token（是否被备域名接受未经验证，失败时链内跳过）。
+3. **星海聚合 qs 取值**：按 xinghai qs 分支，另取 `data.url`（附 `data.key`）或 `data.source_url`。
+4. **wwwweb 放开到 kw/kg**：qingliang（wy/kw/kg）与 xinglan（kw 备用 API）均把同一接口用于 kw；qingliang 另用于 kg。失败时链内跳过。
+5. **酷我官方**：另取 `data.surl`（xinglan 取 `data.surl` 优先）。
+
+### 6.3 排除项（v1.0.1 新增）
+
+- yunmge 酷我（`api.yunmge.com`）：URL 内含 token 参数值无法核实，且按码率取“不低于请求值”的逻辑与合并规则不合。
+- baimusic QQ（`106.55.0.102`）：AES/RC4/HMAC 自定义加密，密钥依赖、移植成本与收益不合。
+- QQ 官方 `musicu.fcg`、网易 eapi：官方接口，需 Cookie 才能拿完整版。
+- 云记咪咕 URL 路径重写：跨音质降级链违反“不以低音质冒充请求音质”。
+- qingliang 的 `wy-ffapi`（`ffapi.cn/int/v1/netease_url`）与 `wy-bileizhen`（`api.bileizhen.top`）：作者默认关闭，有超时样本。
+- search / lyric 均不纳入（feichangdao 的汽水搜索、ChKsZ 搜索、汽水 lyric；suyin 的 kw/mg 搜索）。
+
+### 6.4 待实测裁决（未改动 merged.js）
+
+- 溯音酷我 128k/320k 的 br：suyin 3/2 vs qdy/feichangdao/merged.js 7/5。
+- 溯音 QQ flac24bit 的 br：feichangdao 1 vs suyin 回落 7 vs merged.js（qdy）3。
+- 星海聚合备域名是否接受服务器令牌；GDStudio 是否要求附带星海服务器令牌。
+- kw/flac24bit 经星海聚合的结果（xinghai 已把 kw 高音质降级到 flac）。
+
+### 6.5 检查结果
+
+```text
+$ node --check merged.js
+SYNTAX OK
+$ node --check latest.js
+SYNTAX OK
+$ node /tmp/lx-smoke.js        # 最小 globalThis.lx 桩，request 一律网络错误
+inited sent: true
+inited.status: true
+sources: kw,kg,tx,wy,mg,qs
+  kw: actions=musicUrl qualitys=128k,320k,flac,flac24bit
+  kg: actions=musicUrl qualitys=128k,320k,flac,flac24bit
+  tx: actions=musicUrl qualitys=128k,320k,flac,flac24bit
+  wy: actions=musicUrl qualitys=128k,320k,flac,flac24bit
+  mg: actions=musicUrl qualitys=128k,320k,flac,flac24bit
+  qs: actions=musicUrl qualitys=128k,320k,flac
+qs/flac correctly rejected: 全部后端失败(qs/flac): HYWmusic: HYWmusic 不支持 qs/flac | 星海聚合主: 星海聚合 获取服务器令牌失败 | 星海聚合备: 星海聚合 获取服务器令牌失败 | 汽水H5: 汽水H5 只支持 qs/128k
+kw/128k returned direct URL: https://music-dl.sayqz.com/api/?source=kuwo&id=test123&type=url&br=128k
+wy/128k returned direct URL: http://yinyue.haitangw.net/wy/wy.php?type=mp3&id=test123&level=standard
+search correctly rejected: 不支持的操作: search
+master quality correctly rejected: 不支持的音质: master
+qs/128k correctly rejected: 全部后端失败(qs/128k): HYWmusic: stub: network disabled | 星海聚合主: 星海聚合 获取服务器令牌失败 | 星海聚合备: 星海聚合 获取服务器令牌失败 | 汽水H5: stub: network disabled
+SMOKE DONE
+```
+
+混淆版 `latest.js` 用同一桩测过，结果一致（inited 正常、qs/flac 正确抛错、kw/128k 与 wy/128k 直链返回、search/master 被拒绝）。
+
+结论：
+
+- 脚本能加载，`inited` 正常发出（`status: true`，6 个平台，音质与要求一致）。
+- 后端全部不可达时能正确抛错（未卡死、未静默成功）；星海聚合在拿不到服务器令牌时直接抛错、不发无效请求。
+- 直链类后端不依赖网络：kw/128k 由 sayqz、wy/128k 由长青直链返回 URL 字符串。
+- 非 musicUrl 动作与未声明音质均被拒绝。
+- lerd `init.conf` 启动探测与星海令牌预取失败时不阻塞加载、不抛未捕获异常。
+- 未做真实音乐接口请求，未验证任何后端实际出链；上线前需在洛雪客户端里实测各平台/音质的出链情况（各后端可用性以实测为准）。

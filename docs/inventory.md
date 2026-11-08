@@ -308,3 +308,41 @@ Tier C 只能在清单里注明来源与已知 host，不能把 URL 模板写进
 | zddyr.top | ok 200 | zrcdy.dpdns.org | ok 200 | — | — |
 
 共 71 个主机：38 ok、17 warn、16 failed。
+
+---
+
+## 2026-11-09 更新（上游 commit `ed8328dbd1a77aee3ee0116d835eb9d907eeaad2`，合并版 v1.0.1）
+
+基线 `000578d` → `ed8328d`，7 个提交。`CreateLatest.py` VERSIONS 变化：新增 feichangdao v5、qingliang v2.1.0、suyin v1、xinglan v4.0.2；xinghai 2.3.15 → 3.2.18；yuningxi 1.2.2 → 1.2.5；其余 14 个源的 `latest.js` 与版本号无变化（flower/grass 仅 probe.py 与 README 变化，`latest.js` 0 行改动）。
+
+### 17. feichangdao — 非常刀 v5（新增，443 行，可读）
+
+- 平台与音质：wy/tx/kg 各 `128k/320k/flac/flac24bit`；kw `128k/320k/flac`；mg `128k/320k/flac`；qs 仅 `128k`。
+- 后端：ChKsZ（`api.chksz.top/api/163_music`，wy，`Referer: https://cp.chksz.top/`，level 128k→standard、320k→exhigh、flac→lossless、flac24bit→jymaster）**新增 Tier A**；汽水 H5（`api.qishui.com/luna/h5/track`，qs/128k，`video_model` JSON 字符串 → `video_list[0].main_url`）**新增 Tier A**；其余（GDStudio、溯音 QQ/163/酷我、xcvts 咪咕、长青/念心直链）与合并版已有后端重复。汽水搜索（`api-vehicle.volcengine.com`）与 ChKsZ 搜索属 search 动作，不纳入。
+
+### 18. qingliang — 轻量音源 v2.1.0（新增，476 行，可读）
+
+- 平台与音质：tx 仅 `128k`；wy/kw/kg 各 `128k/320k/flac`。无 flac24bit、mg、qs。
+- 后端：迅回 QQ（`api.xunhuisi.store/API/QQMusic/Song.php`，tx/128k，code 200 + `music_url`）**新增 Tier A**；lzm（`music.lzmhhh.com/api/music/url` 表单 POST，tx 128k/320k、wy 仅 320k）**新增 Tier A**；yutang（`api.yutangxiaowu.cn/api/music/Song_V1`，wy）/ kangqi（`ncm.kangqiovo.com/Song_V1` 表单 POST，wy）/ qjqq（`metings.qjqq.cn/Song_V1` 表单 POST，wy）**新增 Tier A**；酷狗手机版（`m.kugou.com/app/i/getSongInfo.php`，无音质参数）与酷狗 Web 版（`wwwapi.kugou.com/yy/index.php?r=play/getdata`，无音质参数，mid 固定全 0）**新增 Tier A**（挂 kg 链末尾兜底）；网易免费外链（`music.163.com/song/media/outer/url?id=.mp3`，wy/128k 直返）**新增 Tier A**；wwwweb 用于 wy/kw/kg（与 helloworld 的 wy-only 用法相比扩展到 kw/kg）；GDStudio（wy，不带 xbridge 参数）与酷我官方（nmobi）与合并版重复。`wy-ffapi`（`ffapi.cn/int/v1/netease_url`）与 `wy-bileizhen`（`api.bileizhen.top/api/netease`）作者默认关闭（有超时样本），不纳入。跨平台同曲换源（search.kuwo.cn）不在 musicUrl 合并范围。
+
+### 19. suyin — 溯音音源 v1（新增，583 行，可读，作者竹佀）
+
+- 平台与音质：tx `128k/320k/flac/hires/atmos/master`（无 flac24bit 键）；wy/kw 各 `128k/320k/flac`；mg `128k/320k`。无 kg、qs。
+- 后端：全部与合并版重复（溯音 QQ/163/酷我、xcvts 咪咕）。**协议冲突待实测**：溯音酷我 br（suyin 128k→3、320k→2）与 qdy/feichangdao/合并版（128k→7、320k→5）不一致，suyin 为孤证，暂不改动；溯音 QQ flac24bit 的 br 三源不一致（feichangdao 1、suyin 回落 7、合并版按 qdy 为 3），暂不改动。
+
+### 20. xinglan — 星澜聚合音源 v4.0.2（新增，1643 行，可读，部分 URL 经 `_u` 凯撒移位编码，已解码核实）
+
+- 平台与音质：tx/wy/kg/mg/qs 较全（含 hires/atmos/master 等扩展音质，合并版只取 128k/320k/flac/flac24bit）；kw 另有 192k。
+- 新增 Tier A 后端：落月 QQ（`api.vkeys.cn` v2 geturl → v3 song/link，tx，quality 6/8/10/10）；317ak（`api.317ak.cn/api/yinyue/qqyinyue`，tx，ckey 为上游公开值）；ygking（`api.ygking.cn/api/song/url`，tx）；残像（`api.canxiang.cn/api/wyymusic`，wy，token 为上游公开值）；笒鬼鬼（`api.cenguigui.cn/api/netease/music_v1.php`，wy）；星海 `api.xinghai.com/lx/api/`（kw/kg/mg，新 host）；酷我流媒体（`175.27.166.236:8928/kwstream`，kw 直返，flac24bit 因映射为 flac 不纳入）；酷我手机版（`mobi.kuwo.cn/mobi.s`，kw）；念心酷狗（`mcp.nianxinxz.com/kgqq/kg.php`，kg）；Migu 直接源（`music.migu.cn/v3/api/music/audioPlayer/getPlayInfo`，mg）与 Migu API（`app.c.nf.migu.cn/MIGUM2.0/strategy/listen-url/v2.2`，mg）；Fish API（`music.gdstudio.xyz/api.php`，tx/wy，时间戳 + md5 签名，md5 取 `lx.utils.crypto.md5`）；FFAPI（`ffapi.cn/int/v2/songurl`，tx/wy/kw/kg/mg）；海棠 resolve-url 备用 host `qt.haitangw.net`。
+- 与合并版重复：HYW、星海聚合主（`yy.zddyr.top`，无令牌写法）、GDStudio、海堂 resolve-url（`musicserver`）、wwwweb（kw）、酷我官方（nmobi）、念心直链、长青海棠（即 musicserver resolve-url）、白姬 KG（即 HYW 同一接口）。
+- 未纳入：baimusic QQ（`106.55.0.102`，AES/RC4/HMAC 自定义加密）；QQ 官方 `musicu.fcg` 与网易 eapi（官方接口，需 Cookie 才能拿完整版）；云记咪咕 URL 路径重写（跨音质降级链，违反合并规则）；yunmge 酷我（`api.yunmge.com`，URL 内含 token 参数值无法核实，且按码率取“不低于请求值”）。
+
+### xinghai v3.2.18（957 行 → 537 行）
+
+- **鉴权根本性变化**：令牌只能由服务器签发，`GET https://yy.zddyr.top/lx/api/token.php?device_id={deviceId}` → `data.token`；本地自签 base64 令牌自 2026-11 起服务端一律按 403 处理。合并版 v1.0.0 的本地自签写法已失效，v1.0.1 已改为服务器令牌（4 分钟本地换新，`auth.tk_mismatch`/`untrusted-token`/`tk_error` 时刷新一次重试；拿不到令牌不发请求）。
+- 备用域名 `zrcdy.dpdns.org` 删除引用（合并版备条目保留，但令牌复用主域名签发的 token，是否被备域名接受未经验证）；酷我本地直连整段删除（合并版酷我官方来自 helloworld，不受影响）；kw 音质缩减为 128k/320k/flac（合并版 kw/flac24bit 经星海聚合的结果需实测）。
+- 其余后端（GDStudio、ChKsZ）URL/参数未变；GD 请求现附带服务器令牌，合并版 GD 不带令牌是否仍可用未知，需实测。
+
+### yuningxi v1.2.5
+
+仍完全混淆，仍为 Tier C，不可纳入。旧版头注释里的注册入口与备用地址（`api-v2.yuafeng.cn`、`ynx.de5.net`）在新版可读层已被删除，全文 grep 均为 0 次。
