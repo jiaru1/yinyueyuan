@@ -1,7 +1,7 @@
 /*!
  * @name 音乐源
- * @description 由 pdone/lx-music-source 16 个音源按后端去重合并，仅含协议已明确的后端
- * @version 1.0.0
+ * @description 由 pdone/lx-music-source 20 个音源按后端去重合并，仅含协议已明确的后端
+ * @version 1.0.1
  * @author jiaru1（合并整理）
  * @repository https://github.com/pdone/lx-music-source（上游）
  * @preserve
@@ -13,8 +13,9 @@
  *   同一平台挂多个后端顺序试，拿到可用 URL 即返回，全部失败才抛错。
  * - 直链类后端（music-dl.sayqz.com、海棠/长青/念心 php 直链）直接返回
  *   URL 字符串，由洛雪客户端当播放地址请求，不经过脚本 fetch。
- * - HYW / Huibq / 溯音 QQ 的密钥均为上游公开共享密钥，失效可自行替换，
+ * - HYW / Huibq / 溯音 QQ / 317ak / 残像的密钥均为上游公开共享密钥，失效可自行替换，
  *   详见各后端注释与 BUILD_NOTES.md。
+ * - 星海聚合的令牌由服务端签发（先调 /lx/api/token.php 取 token），本地自签写法已失效。
  * - 音质归一化：flac24bit 与 24bit 统一写 flac24bit；某后端不支持某音质时
  *   该后端跳过该音质，不硬传、不降级透传。
  */
@@ -291,42 +292,57 @@ const parseMessageSongInfo = (message) => {
   return result.song ? result : null
 }
 
-// ---------- 星海聚合 X-Token ----------
+// ---------- 星海聚合服务器令牌 ----------
 
-// 照抄 helloworld 的 before() 做法（helloworld/latest.js L85-110，kg/tx/wy/mg 各一份相同逻辑）：
-// device_id lx-online-随机串，payload { device_id, ip: '0.0.0.0', timestamp, random } 做 base64，5 分钟缓存；
-// 优先用 globalThis.lx.utils.buffer，取不到再用 Buffer / btoa。
-// 请求头：X-Token + X-Client: YYMusicSource/v1.0.0 (Android)
+// xinghai v3.2.18（xinghai/latest.js L188-260）：令牌只能由服务器签发，
+// GET https://yy.zddyr.top/lx/api/token.php?device_id={deviceId} → data.token；
+// 本地自签 base64 令牌自 2026-11 起服务端一律按 403 处理，旧写法已失效。
+// token 有效期 5 分钟，本地 4 分钟换新；响应体 auth.tk_mismatch /
+// device_id 'untrusted-token' / tk_error 时刷新一次重试。拿不到令牌不发请求。
+// deviceId 生成方式与旧版相同（xinghai/latest.js L171）。
+const XINGHAI_TOKEN_TTL = 4 * 60 * 1000
 let xinghaiDeviceId = ''
 let xinghaiToken = ''
 let xinghaiTokenTs = 0
-const getXinghaiToken = () => {
+let xinghaiTokenPromise = null
+const getXinghaiDeviceId = () => {
   if (!xinghaiDeviceId) {
     xinghaiDeviceId = 'lx-online-' + Math.random().toString(36).substring(2, 8) + Date.now().toString(36).slice(-4)
   }
-  if (!xinghaiToken || Date.now() - xinghaiTokenTs > 5 * 60 * 1000) {
-    const payload = {
-      device_id: xinghaiDeviceId,
-      ip: '0.0.0.0',
-      timestamp: Math.floor(Date.now() / 1000),
-      random: Math.random().toString(36).substring(2, 12),
-    }
-    try {
-      const lxUtils = globalThis.lx && globalThis.lx.utils && globalThis.lx.utils.buffer
-      if (lxUtils && lxUtils.from) {
-        const buf = lxUtils.from(JSON.stringify(payload), 'utf-8')
-        xinghaiToken = lxUtils.bufToString(buf, 'base64')
-      } else if (typeof Buffer !== 'undefined') {
-        xinghaiToken = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64')
-      } else {
-        xinghaiToken = btoa(unescape(encodeURIComponent(JSON.stringify(payload))))
-      }
-    } catch (e) {
-      xinghaiToken = ''
-    }
+  return xinghaiDeviceId
+}
+const fetchXinghaiServerToken = async () => {
+  const url = 'https://yy.zddyr.top/lx/api/token.php?device_id=' + encodeURIComponent(getXinghaiDeviceId())
+  try {
+    const res = await httpFetch(url, {
+      method: 'GET',
+      headers: { 'User-Agent': 'lx-music', 'X-Client': 'YYMusicSource/v1.0.0 (Android)' },
+    })
+    const tk = res.body && res.body.data && res.body.data.token
+    return typeof tk === 'string' ? tk : ''
+  } catch (e) {
+    return ''
+  }
+}
+const ensureXinghaiToken = async (force) => {
+  if (!force && xinghaiToken && (Date.now() - xinghaiTokenTs) <= XINGHAI_TOKEN_TTL) return xinghaiToken
+  if (!xinghaiTokenPromise) xinghaiTokenPromise = fetchXinghaiServerToken()
+  let tk = ''
+  try { tk = await xinghaiTokenPromise } catch (e) { tk = '' }
+  xinghaiTokenPromise = null
+  if (tk) {
+    xinghaiToken = tk
     xinghaiTokenTs = Date.now()
   }
   return xinghaiToken
+}
+// 服务端判定令牌不可用时返回 true（xinghai/latest.js L225-232）
+const xinghaiTokenStale = (body) => {
+  const a = body && body.auth
+  if (!a) return false
+  if (a.tk_mismatch === true) return true
+  if (a.device_id === 'untrusted-token' || a.tk_error) return true
+  return false
 }
 
 // ---------- 后端：HYWmusic（103.79.184.97） ----------
@@ -401,18 +417,22 @@ const RESOLVE_LEVEL = {
   tx: { '128k': 'standard', '320k': 'exhigh', flac: 'lossless', flac24bit: 'hires' },
   wy: { '128k': 'standard', '320k': 'exhigh', flac: 'lossless', flac24bit: 'hires' },
 }
-const haitangResolveUrl = async (source, musicInfo, quality) => {
+const makeHaitangResolve = (host) => async (source, musicInfo, quality) => {
   const levelMap = RESOLVE_LEVEL[source]
   if (!levelMap || !levelMap[quality]) throw new Error('海棠 resolve-url 不支持 ' + source + '/' + quality)
   const rid = source === 'kw' ? getKwRid(musicInfo) : getIdByFields(musicInfo, ['hash', 'songmid', 'rid', 'id'])
   if (!rid) throw new Error('海棠 resolve-url 缺少 rid')
-  const body = await httpPostJson('https://musicserver.haitangw.cc/v1/music/resolve-url',
+  const body = await httpPostJson('https://' + host + '/v1/music/resolve-url',
     { source, rid, level: levelMap[quality] },
     { 'User-Agent': 'Mozilla/5.0' })
   const url = extractUrl(body, ['data.url', 'url'])
   if (url) return url
   throw new Error('海棠 resolve-url 未返回可用 URL')
 }
+// 主 host musicserver.haitangw.cc（helloworld）；
+// 备用 host qt.haitangw.net（xinglan/latest.js L597-603 云记通用接口，同一路径与参数）。
+const haitangResolveUrl = makeHaitangResolve('musicserver.haitangw.cc')
+const haitangResolveQtUrl = makeHaitangResolve('qt.haitangw.net')
 
 // ---------- 后端：星海聚合（yy.zddyr.top 主 / zrcdy.dpdns.org 备） ----------
 
@@ -422,6 +442,9 @@ const haitangResolveUrl = async (source, musicInfo, quality) => {
 // code 200 + url，403 屏蔽聚合）。
 // 备域名路径按 jiexiang 咪咕备后端写法为 /lx/api/api.php（jiexiang/latest.js L1878-1890），
 // 不是 /lx/api/，见 BUILD_NOTES.md。
+// 注意：xinghai v3.2.18 已删除备域名引用，备条目失去上游佐证；此处仍保留，
+// 令牌复用主域名签发的 token（是否被备域名接受未经验证，失败时链内跳过）。
+// qs 分支另取 data.url（附 data.key）或 data.source_url（xinghai/latest.js qs 分支）。
 const XINGHAI_SOURCE_MAP = { tx: 'qq', mg: 'migu', kw: 'kw', kg: 'kg', qs: 'qs' }
 const makeXinghaiAgg = (host, path) => async (source, musicInfo, quality) => {
   const backendSource = XINGHAI_SOURCE_MAP[source] || source
@@ -444,23 +467,44 @@ const makeXinghaiAgg = (host, path) => async (source, musicInfo, quality) => {
   const query = Object.keys(params)
     .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
     .join('&')
-  const res = await httpFetch('https://' + host + path + '?' + query, {
+  const token = await ensureXinghaiToken()
+  if (!token) throw new Error('星海聚合 获取服务器令牌失败')
+  const doFetch = async (tk) => httpFetch('https://' + host + path + '?' + query, {
     method: 'GET',
     headers: {
       'User-Agent': 'Mozilla/5.0',
-      'X-Token': getXinghaiToken(),
+      'X-Token': tk,
       'X-Client': 'YYMusicSource/v1.0.0 (Android)',
     },
   })
+  let res = await doFetch(token)
+  if (xinghaiTokenStale(res.body)) {
+    xinghaiToken = ''
+    xinghaiTokenTs = 0
+    const fresh = await ensureXinghaiToken(true)
+    if (!fresh) throw new Error('星海聚合 令牌刷新失败')
+    res = await doFetch(fresh)
+  }
   if (res.statusCode === 403) throw new Error('星海聚合 403')
   if (res.statusCode !== undefined && res.statusCode !== 200) {
     throw new Error('星海聚合 HTTP ' + res.statusCode)
   }
   const body = res.body
-  if (!body || typeof body !== 'object' || body.code !== 200 || !body.url) {
+  if (!body || typeof body !== 'object' || body.code !== 200) {
     throw new Error('星海聚合：' + ((body && body.msg) || '无数据'))
   }
-  return body.url
+  if (isUrl(body.url)) return body.url.trim()
+  if (body.data && typeof body.data === 'object') {
+    let dataUrl = body.data.url
+    if (isUrl(dataUrl)) {
+      if (body.data.key && !/[?&]key=/.test(dataUrl)) {
+        dataUrl += (dataUrl.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(body.data.key)
+      }
+      return dataUrl.trim()
+    }
+    if (isUrl(body.data.source_url)) return body.data.source_url.trim()
+  }
+  throw new Error('星海聚合：' + ((body && body.msg) || '无数据'))
 }
 const xinghaiAggUrl = makeXinghaiAgg('yy.zddyr.top', '/lx/api/')
 const xinghaiAggBackupUrl = makeXinghaiAgg('zrcdy.dpdns.org', '/lx/api/api.php')
@@ -639,12 +683,15 @@ const lingchuanUrl = async (source, musicInfo, quality) => {
 
 // helloworld/latest.js L207-230：POST /music/url，JSON { source: 'wy', musicId, quality }，
 // code 200 + url。id 取 hash ?? songmid（其 idField 为 ['hash', 'songmid']）。
+// qingliang/latest.js（jobs，wwwweb 用于 wy/kw/kg）与 xinglan/latest.js
+// （HelloWorld KW 备用API，source: 'kw'）均把同一接口用于 kw；
+// qingliang 另用于 kg。故本后端放开到 wy/kw/kg，失败时链内跳过。
 const wwwwebUrl = async (source, musicInfo, quality) => {
-  if (source !== 'wy') throw new Error('wwwweb 只支持 wy')
+  if (source !== 'wy' && source !== 'kw' && source !== 'kg') throw new Error('wwwweb 只支持 wy/kw/kg')
   const id = getIdByFields(musicInfo, ['hash', 'songmid'])
   if (!id) throw new Error('wwwweb 缺少 id')
   const body = await httpPostJson('https://c.wwwweb.top/music/url',
-    { source: 'wy', musicId: id, quality },
+    { source, musicId: id, quality },
     { 'User-Agent': 'lx-music-desktop/2.10.1' })
   if (body && body.code === 200 && body.url) return body.url
   throw new Error((body && body.message) || 'wwwweb 无数据')
@@ -737,7 +784,7 @@ const kuwoOfficialUrl = async (source, musicInfo, quality) => {
     + '&source=kwplayerhd_ar_1.1.4.5_tianbao_T1A_qirui.apk'
     + '&type=convert_url_with_sign&rid=' + encodeURIComponent(rid) + '&br=' + br
   const body = await httpGetJson(url, { 'User-Agent': 'Mozilla/5.0 (Linux; Android) AppleWebKit/537.36' })
-  const result = extractUrl(body, ['data.url', 'url'])
+  const result = extractUrl(body, ['data.surl', 'data.url', 'url'])
   if (result) return result
   throw new Error('酷我官方 未返回可用 URL')
 }
@@ -953,14 +1000,537 @@ const makeDirect = (family) => async (source, musicInfo, quality) => {
     .replace('{level}', encodeURIComponent(qualityToLevel(quality)))
 }
 
+// ---------- 后端：ChKsZ（api.chksz.top，仅 wy） ----------
+
+// feichangdao/latest.js L11（端点）、L22（level 映射）、L196-206：
+// GET /api/163_music?id=&level=，请求头 Referer: https://cp.chksz.top/；
+// code 200 + data.url。无 key。level：128k→standard、320k→exhigh、
+// flac→lossless、flac24bit→jymaster。不抄其 CHKSZ_FALLBACK 跨音质降级链。
+const CHKSZ_LEVEL = { '128k': 'standard', '320k': 'exhigh', flac: 'lossless', flac24bit: 'jymaster' }
+const chkszUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('ChKsZ 只支持 wy')
+  const level = CHKSZ_LEVEL[quality]
+  if (!level) throw new Error('ChKsZ 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['hash', 'songmid', 'id', 'rid', 'songId'])
+  if (!id) throw new Error('ChKsZ 缺少 id')
+  const body = await httpGetJson(
+    'https://api.chksz.top/api/163_music?id=' + encodeURIComponent(id) + '&level=' + level,
+    { Referer: 'https://cp.chksz.top/' })
+  if (body && body.code === 200 && body.data && body.data.url) return body.data.url
+  throw new Error('ChKsZ 无数据')
+}
+
+// ---------- 后端：汽水 H5（api.qishui.com，仅 qs/128k） ----------
+
+// feichangdao/latest.js L19、L287-296：
+// GET /luna/h5/track?track_id= → track_player.video_model（JSON 字符串）
+// → video_list[0].main_url。无 key、无音质参数；qs 只声明 128k，
+// 320k/flac 时跳过，不冒充。
+const qishuiH5Url = async (source, musicInfo, quality) => {
+  if (source !== 'qs' || quality !== '128k') throw new Error('汽水H5 只支持 qs/128k')
+  const id = getIdByFields(musicInfo, ['hash', 'songmid', 'id', 'rid', 'songId'])
+  if (!id) throw new Error('汽水H5 缺少 id')
+  const body = await httpGetJson(
+    'https://api.qishui.com/luna/h5/track?track_id=' + encodeURIComponent(id),
+    { Accept: 'application/json' })
+  let videoModel = null
+  try { videoModel = JSON.parse((body && body.track_player && body.track_player.video_model) || '') } catch (e) { videoModel = null }
+  const url = videoModel && videoModel.video_list && videoModel.video_list[0] && videoModel.video_list[0].main_url
+  if (isUrl(url)) return url.trim()
+  throw new Error('汽水H5 无链接')
+}
+
+// ---------- 后端：迅回 QQ（api.xunhuisi.store，仅 tx/128k） ----------
+
+// qingliang/latest.js L230-236：
+// GET /API/QQMusic/Song.php?mid=&type=json → code 200 + music_url。
+const xunhuisiUrl = async (source, musicInfo, quality) => {
+  if (source !== 'tx' || quality !== '128k') throw new Error('迅回QQ 只支持 tx/128k')
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('迅回QQ 缺少 mid')
+  const body = await httpGetJson(
+    'https://api.xunhuisi.store/API/QQMusic/Song.php?mid=' + encodeURIComponent(id) + '&type=json',
+    { 'User-Agent': 'Mozilla/5.0' })
+  if (body && Number(body.code) === 200 && typeof body.music_url === 'string' && isUrl(body.music_url)) {
+    return body.music_url.trim()
+  }
+  throw new Error('迅回QQ 无数据')
+}
+
+// ---------- 表单 POST 工具 ----------
+
+// form 表单 POST（qingliang 的 formRequest 写法）：
+// Content-Type: application/x-www-form-urlencoded，body 为 query 字符串。
+const httpPostForm = async (url, values, headers) => {
+  const body = Object.keys(values)
+    .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(values[k]))
+    .join('&')
+  const res = await httpFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(headers || {}) },
+    body,
+  })
+  if (res.statusCode !== undefined && res.statusCode >= 400) {
+    throw new Error('HTTP ' + res.statusCode)
+  }
+  return res.body
+}
+
+// ---------- 后端：lzm（music.lzmhhh.com，tx / wy） ----------
+
+// qingliang/latest.js L264-266（qq-lzm）、L283-285（wy-lzm）：
+// POST /api/music/url，表单 { id, type: 'qq' | 'wy' }，Referer https://music.lzmhhh.com/；
+// 取 data（URL 字符串本身）或 data.url。tx 为 128k/320k；wy 只 320k
+// （该接口固定返回其服务端音质，不当作 flac 或低码率专线）。
+const lzmUrl = async (source, musicInfo, quality) => {
+  const type = source === 'tx' ? 'qq' : source === 'wy' ? 'wy' : null
+  if (!type) throw new Error('lzm 不支持 ' + source)
+  if (source === 'wy' && quality !== '320k') throw new Error('lzm wy 只支持 320k')
+  if (source === 'tx' && quality !== '128k' && quality !== '320k') throw new Error('lzm tx 只支持 128k/320k')
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('lzm 缺少 id')
+  const body = await httpPostForm('https://music.lzmhhh.com/api/music/url',
+    { id, type }, { Referer: 'https://music.lzmhhh.com/' })
+  const url = extractUrl(body, ['data.url', 'data', 'url'])
+  if (url) return url
+  throw new Error('lzm 无数据')
+}
+
+// ---------- 后端：网易三小接口（yutang / kangqi / qjqq，仅 wy） ----------
+
+// qingliang/latest.js L267-277：level 128k→standard、320k→exhigh、flac→lossless。
+// yutang：GET https://api.yutangxiaowu.cn/api/music/Song_V1?url=&level=&type=json → url/data.url。
+// kangqi：POST https://ncm.kangqiovo.com/Song_V1，表单 { url, level, type: json }，
+//   Referer https://ncm.kangqiovo.com/ → data.url/url。
+// qjqq：POST https://metings.qjqq.cn/Song_V1，表单同上 → data.url/url。
+const WY_EXTRA_LEVEL = { '128k': 'standard', '320k': 'exhigh', flac: 'lossless' }
+const yutangUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('yutang 只支持 wy')
+  const level = WY_EXTRA_LEVEL[quality]
+  if (!level) throw new Error('yutang 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('yutang 缺少 id')
+  const body = await httpGetJson(
+    'https://api.yutangxiaowu.cn/api/music/Song_V1?url=' + encodeURIComponent(id)
+    + '&level=' + level + '&type=json',
+    { 'User-Agent': 'Mozilla/5.0' })
+  const url = extractUrl(body, ['url', 'data.url'])
+  if (url) return url
+  throw new Error('yutang 无数据')
+}
+const kangqiUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('kangqi 只支持 wy')
+  const level = WY_EXTRA_LEVEL[quality]
+  if (!level) throw new Error('kangqi 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('kangqi 缺少 id')
+  const body = await httpPostForm('https://ncm.kangqiovo.com/Song_V1',
+    { url: id, level, type: 'json' }, { Referer: 'https://ncm.kangqiovo.com/' })
+  const url = extractUrl(body, ['data.url', 'url'])
+  if (url) return url
+  throw new Error('kangqi 无数据')
+}
+const qjqqUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('qjqq 只支持 wy')
+  const level = WY_EXTRA_LEVEL[quality]
+  if (!level) throw new Error('qjqq 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('qjqq 缺少 id')
+  const body = await httpPostForm('https://metings.qjqq.cn/Song_V1',
+    { url: id, level, type: 'json' })
+  const url = extractUrl(body, ['data.url', 'url'])
+  if (url) return url
+  throw new Error('qjqq 无数据')
+}
+
+// ---------- 后端：酷狗官方两接口（m.kugou.com / wwwapi.kugou.com，仅 kg） ----------
+
+// qingliang/latest.js L292-322（kugouMobile / kugouWebApi）与
+// xinglan/latest.js 酷狗官方：均无音质参数，返回的即服务端给的播放地址；
+// 按合并规则不以低音质冒充请求音质，故只挂在 kg 链末尾作兜底。
+// 手机版：GET https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash= → url/data.url。
+// Web 版：GET https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=&platid=4
+//   &album_id=&mid=00000000000000000000000000000000 → status 1 + data.play_backup_url/data.play_url。
+const kgMobileUrl = async (source, musicInfo, quality) => {
+  if (source !== 'kg') throw new Error('酷狗手机版 只支持 kg')
+  const hash = getIdByFields(musicInfo, ['hash', 'songmid', 'id'])
+  if (!hash) throw new Error('酷狗手机版 缺少 hash')
+  const body = await httpGetJson(
+    'https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=' + encodeURIComponent(hash),
+    { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36', Referer: 'https://m.kugou.com/' })
+  const url = extractUrl(body, ['url', 'data.url'])
+  if (url) return url
+  throw new Error('酷狗手机版 无数据')
+}
+const kgWebApiUrl = async (source, musicInfo, quality) => {
+  if (source !== 'kg') throw new Error('酷狗Web版 只支持 kg')
+  const hash = getIdByFields(musicInfo, ['hash', 'songmid', 'id'])
+  if (!hash) throw new Error('酷狗Web版 缺少 hash')
+  const albumId = musicInfo.albumId || musicInfo.album_id || musicInfo.albumid || ''
+  const body = await httpGetJson(
+    'https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=' + encodeURIComponent(hash)
+    + '&platid=4&album_id=' + encodeURIComponent(String(albumId))
+    + '&mid=00000000000000000000000000000000',
+    { 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.kugou.com/' })
+  if (body && body.status === 1 && body.data) {
+    const url = extractUrl(body, ['data.play_backup_url', 'data.play_url'])
+    if (url) return url
+  }
+  throw new Error('酷狗Web版 无数据')
+}
+
+// ---------- 后端：网易免费外链（music.163.com，仅 wy/128k） ----------
+
+// qingliang/latest.js L394：直接返回 URL 字符串，不发请求；
+// https://music.163.com/song/media/outer/url?id={id}.mp3（128k mp3）。
+const neteaseFreeUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy' || quality !== '128k') throw new Error('网易免费外链 只支持 wy/128k')
+  const id = getIdByFields(musicInfo, ['songmid', 'mid', 'id', 'hash'])
+  if (!id) throw new Error('网易免费外链 缺少 id')
+  return 'https://music.163.com/song/media/outer/url?id=' + encodeURIComponent(id) + '.mp3'
+}
+
+// ---------- 后端：落月 QQ（api.vkeys.cn，仅 tx） ----------
+
+// xinglan/latest.js L862-905（v4.0.2 主线路）、L364-372（音质映射）：
+// 线路1 GET /v2/music/tencent/geturl?mid=&quality=，失败降级线路2
+// GET /music/tencent/song/link?mid=&quality=；取 data.url 或 data 字符串本身。
+// quality：128k→6、320k→8、flac→10、flac24bit→10。
+// （同文件另有一份旧 vkeys 条目用 8/9/10/16…另一套映射，按 host+路径去重只留落月这一份。）
+const LUOYUE_QUALITY = { '128k': '6', '320k': '8', flac: '10', flac24bit: '10' }
+const luoyueUrl = async (source, musicInfo, quality) => {
+  if (source !== 'tx') throw new Error('落月QQ 只支持 tx')
+  const q = LUOYUE_QUALITY[quality]
+  if (!q) throw new Error('落月QQ 不支持音质 ' + quality)
+  const mid = getIdByFields(musicInfo, ['songmid', 'strMediaMid', 'mediaMid', 'id'])
+  if (!mid) throw new Error('落月QQ 缺少 mid')
+  const paths = [
+    'https://api.vkeys.cn/v2/music/tencent/geturl?mid=' + encodeURIComponent(mid) + '&quality=' + q,
+    'https://api.vkeys.cn/music/tencent/song/link?mid=' + encodeURIComponent(mid) + '&quality=' + q,
+  ]
+  let lastError = null
+  for (const url of paths) {
+    try {
+      const body = await httpGetJson(url, { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' })
+      const result = extractUrl(body, ['data.url', 'data', 'url'])
+      if (result) return result
+      throw new Error('落月QQ 未返回有效 URL')
+    } catch (e) {
+      lastError = e
+    }
+  }
+  throw new Error('落月QQ 两线路均失败: ' + ((lastError && lastError.message) || 'unknown'))
+}
+
+// ---------- 后端：317ak（api.317ak.cn，仅 tx） ----------
+
+// xinglan/latest.js（_u 解码后）：
+// GET /api/yinyue/qqyinyue?ckey=&i=&br=&type=json&lrc=1 → url/data.url；
+// br：128k→5、320k→6、flac→8、flac24bit→7。ckey 为上游公开值（同 HYW 卡密类共享密钥）。
+const AK317_BR = { '128k': '5', '320k': '6', flac: '8', flac24bit: '7' }
+const ak317Url = async (source, musicInfo, quality) => {
+  if (source !== 'tx') throw new Error('317ak 只支持 tx')
+  const br = AK317_BR[quality]
+  if (!br) throw new Error('317ak 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'id', 'hash'])
+  if (!id) throw new Error('317ak 缺少 songmid')
+  const body = await httpGetJson(
+    'https://api.317ak.cn/api/yinyue/qqyinyue?ckey=ZK76QJCIH5PPICJOOXUH&i=' + encodeURIComponent(id)
+    + '&br=' + br + '&type=json&lrc=1',
+    { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' })
+  const url = extractUrl(body, ['url', 'data.url'])
+  if (url) return url
+  throw new Error('317ak 无数据')
+}
+
+// ---------- 后端：ygking QQ（api.ygking.cn，仅 tx） ----------
+
+// xinglan/latest.js L737-748（_u 解码后）：
+// GET /api/song/url?mid=&quality= → code 0 + data[mid]；
+// quality：128k→128、320k→320、flac→flac、flac24bit→hires。
+const YGKING_QUALITY = { '128k': '128', '320k': '320', flac: 'flac', flac24bit: 'hires' }
+const ygkingUrl = async (source, musicInfo, quality) => {
+  if (source !== 'tx') throw new Error('ygking 只支持 tx')
+  const q = YGKING_QUALITY[quality]
+  if (!q) throw new Error('ygking 不支持音质 ' + quality)
+  const mid = getIdByFields(musicInfo, ['songmid', 'strMediaMid', 'mediaMid', 'id'])
+  if (!mid) throw new Error('ygking 缺少 mid')
+  const body = await httpGetJson(
+    'https://api.ygking.cn/api/song/url?mid=' + encodeURIComponent(mid) + '&quality=' + q,
+    { 'User-Agent': 'Mozilla/5.0' })
+  if (body && body.code === 0 && body.data && isUrl(body.data[mid])) return body.data[mid].trim()
+  throw new Error('ygking 失败')
+}
+
+// ---------- 后端：残像 WY（api.canxiang.cn，仅 wy） ----------
+
+// xinglan/latest.js L750-769（_u 解码后）：
+// GET /api/wyymusic?token=canxiang_token_2026&type=&id=（无 id 时 msg=歌名+歌手&n=1）
+// → code 200 + data.url；type：128k→128k、320k→320k、flac→flac、flac24bit→hires。
+const CANXIANG_TYPE = { '128k': '128k', '320k': '320k', flac: 'flac', flac24bit: 'hires' }
+const canxiangUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('残像 只支持 wy')
+  const type = CANXIANG_TYPE[quality]
+  if (!type) throw new Error('残像 不支持音质 ' + quality)
+  const params = { token: 'canxiang_token_2026', type }
+  const id = getIdByFields(musicInfo, ['songId', 'id', 'songmid'])
+  if (id) params.id = id
+  else {
+    const name = musicInfo.name || musicInfo.songName || ''
+    const singer = musicInfo.singer || ''
+    if (!name) throw new Error('残像 缺少 id 或歌名')
+    params.msg = singer ? name + ' ' + singer : name
+    params.n = 1
+  }
+  const query = Object.keys(params)
+    .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(params[k])).join('&')
+  const body = await httpGetJson('https://api.canxiang.cn/api/wyymusic?' + query,
+    { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' })
+  if (body && body.code === 200 && body.data && body.data.url) return body.data.url
+  throw new Error('残像 失败')
+}
+
+// ---------- 后端：笒鬼鬼（api.cenguigui.cn，仅 wy） ----------
+
+// xinglan/latest.js（_u 解码后）：
+// GET /api/netease/music_v1.php?id=&type=json&level= → data.url/url；
+// level：128k→standard、320k→exhigh、flac→lossless、flac24bit→hires。
+const cenguiguiUrl = async (source, musicInfo, quality) => {
+  if (source !== 'wy') throw new Error('笒鬼鬼 只支持 wy')
+  const level = WY_EXTRA_LEVEL[quality] || (quality === 'flac24bit' ? 'hires' : null)
+  if (!level) throw new Error('笒鬼鬼 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'id', 'hash'])
+  if (!id) throw new Error('笒鬼鬼 缺少 id')
+  const body = await httpGetJson(
+    'https://api.cenguigui.cn/api/netease/music_v1.php?id=' + encodeURIComponent(id)
+    + '&type=json&level=' + level,
+    { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' })
+  const url = extractUrl(body, ['data.url', 'url'])
+  if (url) return url
+  throw new Error('笒鬼鬼 无数据')
+}
+
+// ---------- 后端：星海 api.xinghai.com（kw / kg / mg） ----------
+
+// xinglan/latest.js L770-789 getXinghai（_u 解码后）：
+// GET /lx/api/?source={kw|kg|migu}&name={歌名 歌手}&songmid=&quality= → code 200 + url；
+// quality：128k→128kmp3、320k→320kmp3、flac→flac、flac24bit→hires。
+// 与 yy.zddyr.top 的星海聚合不是同一 host，按去重规则单列。
+const XINGHAI_API_SOURCE_MAP = { kw: 'kw', kg: 'kg', mg: 'migu' }
+const XINGHAI_API_QUALITY = { '128k': '128kmp3', '320k': '320kmp3', flac: 'flac', flac24bit: 'hires' }
+const xinghaiApiUrl = async (source, musicInfo, quality) => {
+  const backendSource = XINGHAI_API_SOURCE_MAP[source]
+  const qualityParam = XINGHAI_API_QUALITY[quality]
+  if (!backendSource || !qualityParam) throw new Error('星海api.xinghai.com 不支持 ' + source + '/' + quality)
+  const id = source === 'kg'
+    ? getIdByFields(musicInfo, ['hash', 'songmid', 'id'])
+    : getIdByFields(musicInfo, ['songmid', 'rid', 'id', 'hash'])
+  if (!id) throw new Error('星海api.xinghai.com 缺少 id')
+  const name = ((musicInfo.name || '') + ' ' + (musicInfo.singer || '')).trim()
+  const url = 'https://api.xinghai.com/lx/api/?source=' + backendSource
+    + '&name=' + encodeURIComponent(name)
+    + '&songmid=' + encodeURIComponent(id)
+    + '&quality=' + qualityParam
+  const body = await httpGetJson(url, { 'User-Agent': 'Mozilla/5.0' })
+  if (body && body.code === 200 && body.url) return body.url
+  throw new Error('星海api.xinghai.com 失败')
+}
+
+// ---------- 后端：酷我流媒体（175.27.166.236:8928，仅 kw，直接返回 URL 字符串） ----------
+
+// xinglan/latest.js（_u 解码后）：
+// http://175.27.166.236:8928/kwstream?id=&level=&stream=1（音频流型地址，
+// 由洛雪客户端当播放地址请求）；level：128k→128k、320k→320k、flac→flac。
+// flac24bit 在该源里映射为 flac，属降级，不纳入（该音质跳过本后端）。
+const KWSTREAM_LEVEL = { '128k': '128k', '320k': '320k', flac: 'flac' }
+const kwstreamUrl = async (source, musicInfo, quality) => {
+  if (source !== 'kw') throw new Error('酷我流媒体 只支持 kw')
+  const level = KWSTREAM_LEVEL[quality]
+  if (!level) throw new Error('酷我流媒体 不支持音质 ' + quality)
+  const id = getIdByFields(musicInfo, ['songmid', 'id', 'hash', 'songId', 'musicId'])
+  if (!id) throw new Error('酷我流媒体 缺少 id')
+  return 'http://175.27.166.236:8928/kwstream?id=' + encodeURIComponent(id)
+    + '&level=' + level + '&stream=1'
+}
+
+// ---------- 后端：酷我手机版（mobi.kuwo.cn，仅 kw） ----------
+
+// xinglan/latest.js（_u 解码后）：
+// GET https://mobi.kuwo.cn/mobi.s?f=web&rid=&br= → code 200 + data.url/data.surl；
+// br：128k→128kmp3、320k→320kmp3、flac→2000kflac、flac24bit→4000kflac。
+// 与 nmobi.kuwo.cn 的酷我官方不是同一 host，单列。
+const kuwoMobileUrl = async (source, musicInfo, quality) => {
+  if (source !== 'kw') throw new Error('酷我手机版 只支持 kw')
+  const br = KUWO_BR_MAP[quality]
+  if (!br) throw new Error('酷我手机版 不支持音质 ' + quality)
+  const rid = getIdByFields(musicInfo, ['songmid', 'rid', 'hash', 'id'])
+  if (!rid) throw new Error('酷我手机版 缺少 rid')
+  const body = await httpGetJson(
+    'https://mobi.kuwo.cn/mobi.s?f=web&rid=' + encodeURIComponent(rid) + '&br=' + br,
+    { 'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36' })
+  const url = extractUrl(body, ['data.url', 'data.surl'])
+  if (url) return url
+  throw new Error('酷我手机版 无数据')
+}
+
+// ---------- 后端：念心酷狗（mcp.nianxinxz.com，仅 kg） ----------
+
+// xinglan/latest.js L813-825 getNianxinKg（_u 解码后）：
+// GET /kgqq/kg.php?id=&level=&type=mp3 → code 200 + url，或直接返回 URL 字符串；
+// level：128k→128kmp3、320k→320kmp3、flac→2000kflac、flac24bit→4000kflac。
+// 与 music.nxinxz.com 的念心直链不是同一 host，单列。
+const NIANXIN_KG_LEVEL = { '128k': '128kmp3', '320k': '320kmp3', flac: '2000kflac', flac24bit: '4000kflac' }
+const nianxinKgUrl = async (source, musicInfo, quality) => {
+  if (source !== 'kg') throw new Error('念心酷狗 只支持 kg')
+  const level = NIANXIN_KG_LEVEL[quality]
+  if (!level) throw new Error('念心酷狗 不支持音质 ' + quality)
+  const hash = getIdByFields(musicInfo, ['hash', 'songmid', 'id'])
+  if (!hash) throw new Error('念心酷狗 缺少 hash')
+  const res = await httpFetch(
+    'https://mcp.nianxinxz.com/kgqq/kg.php?id=' + encodeURIComponent(hash)
+    + '&level=' + level + '&type=mp3',
+    { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } })
+  const body = res.body
+  if (typeof body === 'string' && isUrl(body)) return body.trim()
+  if (body && body.code === 200 && body.url) return body.url
+  throw new Error('念心酷狗 失败')
+}
+
+// ---------- 后端：咪咕官方两接口（music.migu.cn / app.c.nf.migu.cn，仅 mg） ----------
+
+// xinglan/latest.js MG 池（_u 解码后），无 Cookie/签名，协议完整：
+// Migu直接源：GET https://music.migu.cn/v3/api/music/audioPlayer/getPlayInfo
+//   ?copyrightId=&level= → data.playUrl/url/playUrl；
+//   level：128k→standard、320k→exhigh、flac/flac24bit→lossless。
+// Migu API：GET https://app.c.nf.migu.cn/MIGUM2.0/strategy/listen-url/v2.2
+//   ?copyrightId=&quality= → data.url/url/data.playUrl；
+//   quality：128k→PQ、320k→HQ、flac→SQ、flac24bit→ZQ。
+const getMiguId = (musicInfo) => getIdByFields(musicInfo, ['copyrightId', 'songmid', 'id', 'hash'])
+const miguDirectUrl = async (source, musicInfo, quality) => {
+  if (source !== 'mg') throw new Error('Migu直接源 只支持 mg')
+  const level = qualityToLevel(quality)
+  const id = getMiguId(musicInfo)
+  if (!id) throw new Error('Migu直接源 缺少 id')
+  const body = await httpGetJson(
+    'https://music.migu.cn/v3/api/music/audioPlayer/getPlayInfo?copyrightId=' + encodeURIComponent(id)
+    + '&level=' + level,
+    { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Referer: 'https://music.migu.cn/' })
+  const url = extractUrl(body, ['data.playUrl', 'url', 'playUrl'])
+  if (url) return url
+  throw new Error('Migu直接源 无数据')
+}
+const MIGU_API_QUALITY = { '128k': 'PQ', '320k': 'HQ', flac: 'SQ', flac24bit: 'ZQ' }
+const miguApiUrl = async (source, musicInfo, quality) => {
+  if (source !== 'mg') throw new Error('Migu API 只支持 mg')
+  const level = MIGU_API_QUALITY[quality]
+  if (!level) throw new Error('Migu API 不支持音质 ' + quality)
+  const id = getMiguId(musicInfo)
+  if (!id) throw new Error('Migu API 缺少 id')
+  const body = await httpGetJson(
+    'https://app.c.nf.migu.cn/MIGUM2.0/strategy/listen-url/v2.2?copyrightId=' + encodeURIComponent(id)
+    + '&quality=' + level,
+    { 'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36', Referer: 'https://app.c.nf.migu.cn/' })
+  const url = extractUrl(body, ['data.url', 'url', 'data.playUrl'])
+  if (url) return url
+  throw new Error('Migu API 无数据')
+}
+
+// ---------- 后端：Fish API（music.gdstudio.xyz，tx / wy，签名请求） ----------
+
+// xinglan/latest.js L710-735（Fish API）：
+// 先 GET https://music.gdstudio.xyz/time 取服务端时间，timeStr 取前 9 位数字；
+// sign = md5('music.gdstudio.xyz|20260510|' + timeStr + '|' + secret).slice(-8).toUpperCase()，
+// secret 为 encodeURIComponent(songmid)；
+// 再 POST 表单到 https://music.gdstudio.xyz/api.php，
+// { types: 'url', id: songmid, source: 'qq' | 'netease', br, s: sign } → body.url。
+// br：128k→128、320k→320、flac→740、flac24bit→999。
+// md5 取 globalThis.lx.utils.crypto.md5（洛雪客户端提供）；无此工具时本后端跳过。
+const FISH_DOMAIN = 'music.gdstudio.xyz'
+const FISH_VERSION = '20260510'
+const FISH_BR_MAP = { '128k': 128, '320k': 320, flac: 740, flac24bit: 999 }
+const cleanFishUrl = (url) => String(url || '')
+  .replace(/\\?u0026/gi, '&')
+  .replace(/\\&/g, '&')
+  .replace(/\\$/, '&')
+const fishSign = async (secret) => {
+  const md5 = globalThis.lx && globalThis.lx.utils && globalThis.lx.utils.crypto && globalThis.lx.utils.crypto.md5
+  if (typeof md5 !== 'function') throw new Error('FishAPI 需要 lx.utils.crypto.md5')
+  let timeStr = ''
+  try {
+    const res = await httpFetch('https://' + FISH_DOMAIN + '/time', { method: 'GET' })
+    timeStr = String(Number(res.body) || Date.now()).slice(0, 9)
+  } catch (e) {
+    timeStr = String(Date.now()).slice(0, 9)
+  }
+  const signInput = FISH_DOMAIN + '|' + FISH_VERSION + '|' + timeStr + '|' + secret
+  return md5(signInput).slice(-8).toUpperCase()
+}
+const fishApiUrl = async (source, musicInfo, quality) => {
+  const fishSource = source === 'tx' ? 'qq' : source === 'wy' ? 'netease' : null
+  const br = FISH_BR_MAP[quality]
+  if (!fishSource || !br) throw new Error('FishAPI 不支持 ' + source + '/' + quality)
+  const songmid = getIdByFields(musicInfo, ['songmid', 'id', 'hash'])
+  if (!songmid) throw new Error('FishAPI 缺少 songmid')
+  const sign = await fishSign(encodeURIComponent(songmid))
+  const body = await httpPostForm('https://' + FISH_DOMAIN + '/api.php',
+    { types: 'url', id: songmid, source: fishSource, br, s: sign },
+    {
+      Origin: 'https://' + FISH_DOMAIN,
+      Referer: 'https://' + FISH_DOMAIN + '/',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'X-Requested-With': 'XMLHttpRequest',
+    })
+  const url = body && body.url ? cleanFishUrl(body.url) : ''
+  if (isUrl(url)) return url.trim()
+  throw new Error('FishAPI 无数据')
+}
+
+// ---------- 后端：FFAPI（ffapi.cn，tx / wy / kw / kg / mg） ----------
+
+// xinglan/latest.js L827-860 getFFAPI：
+// GET https://ffapi.cn/int/v2/songurl?url={平台歌曲页地址} → 取 url 字段；
+// 平台页：tx y.qq.com/n/ryqq/songDetail/{id}、wy music.163.com/song?id={id}、
+// kw www.kuwo.cn/play_detail/{id}、kg www.kugou.com/song/#hash={id}、
+// mg music.migu.cn/v3/music/song/{id}。
+const FFAPI_PAGE = {
+  tx: (id) => 'https://y.qq.com/n/ryqq/songDetail/' + id,
+  wy: (id) => 'https://music.163.com/song?id=' + id,
+  kw: (id) => 'https://www.kuwo.cn/play_detail/' + id,
+  kg: (id) => 'https://www.kugou.com/song/#hash=' + id,
+  mg: (id) => 'https://music.migu.cn/v3/music/song/' + id,
+}
+const ffapiUrl = async (source, musicInfo, quality) => {
+  const page = FFAPI_PAGE[source]
+  if (!page) throw new Error('FFAPI 不支持 ' + source)
+  const id = source === 'kw' ? getKwRid(musicInfo)
+    : source === 'kg' ? getKgId(musicInfo)
+    : getSongId(musicInfo)
+  if (!id) throw new Error('FFAPI 缺少 id')
+  const body = await httpGetJson(
+    'https://ffapi.cn/int/v2/songurl?url=' + encodeURIComponent(page(id)),
+    { 'User-Agent': 'Mozilla/5.0' })
+  const data = typeof body === 'string' ? parseBody(body) : body
+  const url = extractUrl(data, ['url', 'data.url', 'data.play_url', 'data.vipmusic.url'])
+  if (url) return url
+  if (data && Array.isArray(data.data) && data.data[0]) {
+    if (isUrl(data.data[0])) return data.data[0].trim()
+    if (isUrl(data.data[0].url)) return data.data[0].url.trim()
+  }
+  if (typeof data === 'string' && isUrl(data)) return data.trim()
+  if (data && typeof data.data === 'string' && isUrl(data.data)) return data.data.trim()
+  throw new Error('FFAPI 无数据')
+}
+
 // ---------- 后端注册与每平台顺序链 ----------
 
 // 同一后端只出现一次；链内某后端不支持某平台/音质时抛错跳过，继续下一个。
 const BACKENDS = {
   hyw: { name: 'HYWmusic', run: hywMusicUrl },
   haitangResolve: { name: '海棠resolve-url', run: haitangResolveUrl },
+  haitangResolveQt: { name: '海棠resolve-url-qt', run: haitangResolveQtUrl },
   xinghaiAgg: { name: '星海聚合主', run: xinghaiAggUrl },
   xinghaiAggBackup: { name: '星海聚合备', run: xinghaiAggBackupUrl },
+  xinghaiApi: { name: '星海api.xinghai.com', run: xinghaiApiUrl },
   gd: { name: 'GDStudio', run: gdStudioUrl },
   huibq: { name: 'Huibq', run: huibqUrl },
   lerd: { name: '聚合API', run: lerdUrl },
@@ -972,11 +1542,33 @@ const BACKENDS = {
   aaCab: { name: 'a.aa.cab', run: aaCabUrl },
   mcp: { name: 'mcp念心', run: mcpUrl },
   kuwoOfficial: { name: '酷我官方', run: kuwoOfficialUrl },
+  kuwoMobile: { name: '酷我手机版', run: kuwoMobileUrl },
+  kwstream: { name: '酷我流媒体', run: kwstreamUrl },
   oiapiQQ: { name: '溯音QQ', run: oiapiQQUrl },
   oiapi163: { name: '溯音163', run: oiapi163Url },
   oiapiKuwo: { name: '溯音酷我', run: oiapiKuwoUrl },
   oiapiMigu: { name: '溯音咪咕', run: oiapiMiguUrl },
   xcvtsMigu: { name: 'xcvts咪咕', run: xcvtsMiguUrl },
+  chksz: { name: 'ChKsZ', run: chkszUrl },
+  canxiang: { name: '残像', run: canxiangUrl },
+  cenguigui: { name: '笒鬼鬼', run: cenguiguiUrl },
+  yutang: { name: 'yutang', run: yutangUrl },
+  kangqi: { name: 'kangqi', run: kangqiUrl },
+  qjqq: { name: 'qjqq', run: qjqqUrl },
+  lzm: { name: 'lzm', run: lzmUrl },
+  neteaseFree: { name: '网易免费外链', run: neteaseFreeUrl },
+  luoyue: { name: '落月QQ', run: luoyueUrl },
+  ak317: { name: '317ak', run: ak317Url },
+  ygking: { name: 'ygking', run: ygkingUrl },
+  xunhuisi: { name: '迅回QQ', run: xunhuisiUrl },
+  kgMobile: { name: '酷狗手机版', run: kgMobileUrl },
+  kgWebApi: { name: '酷狗Web版', run: kgWebApiUrl },
+  nianxinKg: { name: '念心酷狗', run: nianxinKgUrl },
+  miguDirect: { name: 'Migu直接源', run: miguDirectUrl },
+  miguApi: { name: 'Migu API', run: miguApiUrl },
+  fishApi: { name: 'FishAPI', run: fishApiUrl },
+  ffapi: { name: 'FFAPI', run: ffapiUrl },
+  qishuiH5: { name: '汽水H5', run: qishuiH5Url },
   directYinyue: { name: '长青直链yinyue', run: makeDirect('yinyue') },
   direct175: { name: '长青直链175', run: makeDirect('ip175') },
   directHaitangCc: { name: '海棠直链cc', run: makeDirect('haitangCc') },
@@ -984,21 +1576,28 @@ const BACKENDS = {
   directNianxin: { name: '念心直链', run: makeDirect('nianxin') },
 }
 
+// 新后端一律插在直链模板之前（直链直接返回 URL 字符串，排在其后的后端永远跑不到）；
+// 无音质参数的酷狗官方两接口只挂 kg 链末尾（直链之前）作兜底。
 const CHAINS = {
-  kw: ['hyw', 'haitangResolve', 'xinghaiAgg', 'xinghaiAggBackup', 'gd', 'sayqz',
-    'huibq', 'lingchuan', 'ikun', 'kuwoOfficial', 'oiapiKuwo',
-    'directYinyue', 'directHaitangNet', 'directNianxin'],
-  kg: ['hyw', 'haitangResolve', 'xinghaiAgg', 'xinghaiAggBackup', 'gd',
-    'huibq', 'lingchuan', 'directYinyue', 'directHaitangCc', 'directNianxin'],
-  tx: ['hyw', 'haitangResolve', 'xinghaiAgg', 'xinghaiAggBackup', 'gd', 'sayqz',
-    'huibq', 'lingchuan', 'tang', 'oiapiQQ', 'aaCab',
+  kw: ['hyw', 'haitangResolve', 'haitangResolveQt', 'xinghaiAgg', 'xinghaiAggBackup', 'xinghaiApi',
+    'gd', 'sayqz', 'huibq', 'lingchuan', 'ikun', 'wwwweb', 'kuwoOfficial', 'kuwoMobile',
+    'oiapiKuwo', 'ffapi',
+    'directYinyue', 'directHaitangNet', 'directNianxin', 'kwstream'],
+  kg: ['hyw', 'haitangResolve', 'haitangResolveQt', 'xinghaiAgg', 'xinghaiAggBackup', 'xinghaiApi',
+    'huibq', 'lingchuan', 'wwwweb', 'ffapi', 'nianxinKg', 'kgMobile', 'kgWebApi',
+    'directYinyue', 'directHaitangCc', 'directNianxin'],
+  tx: ['hyw', 'haitangResolve', 'haitangResolveQt', 'xinghaiAgg', 'xinghaiAggBackup', 'gd', 'sayqz',
+    'huibq', 'lingchuan', 'luoyue', 'ak317', 'ygking', 'fishApi', 'ffapi', 'xunhuisi', 'lzm',
+    'tang', 'oiapiQQ', 'aaCab',
     'directYinyue', 'direct175', 'directNianxin'],
-  wy: ['hyw', 'wwwweb', 'haitangResolve', 'xinghaiAgg', 'xinghaiAggBackup', 'gd',
-    'huibq', 'lingchuan', 'ikun', 'oiapi163', 'mcp',
-    'directYinyue', 'direct175', 'directNianxin'],
-  mg: ['hyw', 'xinghaiAgg', 'xinghaiAggBackup', 'gd', 'huibq', 'lingchuan',
-    'xcvtsMigu', 'oiapiMigu', 'directYinyue', 'directHaitangCc', 'directNianxin'],
-  qs: ['hyw', 'xinghaiAgg', 'xinghaiAggBackup'],
+  wy: ['hyw', 'wwwweb', 'haitangResolve', 'haitangResolveQt', 'xinghaiAgg', 'xinghaiAggBackup',
+    'gd', 'huibq', 'lingchuan', 'ikun', 'oiapi163', 'chksz', 'canxiang', 'cenguigui',
+    'yutang', 'kangqi', 'qjqq', 'lzm', 'fishApi', 'ffapi', 'mcp',
+    'directYinyue', 'direct175', 'directNianxin', 'neteaseFree'],
+  mg: ['hyw', 'xinghaiAgg', 'xinghaiAggBackup', 'xinghaiApi', 'gd', 'huibq', 'lingchuan',
+    'miguDirect', 'miguApi', 'ffapi', 'xcvtsMigu', 'oiapiMigu',
+    'directYinyue', 'directHaitangCc', 'directNianxin'],
+  qs: ['hyw', 'xinghaiAgg', 'xinghaiAggBackup', 'qishuiH5'],
 }
 
 // ---------- 核心：顺序 fallback ----------
@@ -1044,3 +1643,7 @@ httpFetch(LERD_API + '/init.conf', { method: 'GET' })
     if (res.body && res.body.code === 200) lerdInitOk = true
   })
   .catch(() => { /* 忽略，聚合 API 后端在 musicUrl 时仍会尝试 */ })
+
+// 星海聚合启动时预取一次服务器令牌（xinghai/latest.js 启动时 ensureTokenFresh）：
+// 失败不阻塞、不影响 inited，musicUrl 时会按需再取。
+ensureXinghaiToken().catch(() => { /* 忽略，星海聚合后端在 musicUrl 时仍会尝试 */ })
